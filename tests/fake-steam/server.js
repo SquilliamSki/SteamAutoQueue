@@ -1,12 +1,17 @@
 // A tiny stand-in for Steam's debug endpoint, so the tool can be tested
 // without Steam. No dependencies: plain Node.js 18+.
 //
-//   node server.js <port> [ok|notready]
+//   node server.js <port> [ok|flat|stuck|notready]
+//
+//   ok        current Steam: download list grouped per PC, ResumeAppUpdate moves items
+//   flat      older Steam: one flat download list
+//   stuck     Steam ignores the request (nothing moves)
+//   notready  Steam still loading (no UI pages yet)
 //
 // GET /json lists pages like Steam does. A WebSocket to the SharedJSContext
 // page accepts Runtime.evaluate and runs the expression against a fake
-// SteamClient with a fixed download list. Each QueueAppUpdate call is printed
-// to stdout as:  QUEUED <appid>
+// SteamClient. Each update Steam accepts is printed to stdout as:  QUEUED <appid>
+// Matches Steam's steamui/sp.js (checked October 2026).
 
 'use strict';
 const http = require('http');
@@ -26,13 +31,39 @@ const ITEMS = [
   { appid: 50, completed: true, active: false, queue_index: -1, deferred_time: 0 },
 ];
 
+// Another PC on the account (Steam remote downloads); must never be touched.
+const REMOTE_ITEMS = [
+  { appid: 99, completed: false, active: false, queue_index: -1, deferred_time: 1730000000 },
+];
+
 async function evaluate(expression) {
+  // Fresh state for every request, so each test starts from the same list.
+  const items = ITEMS.map((i) => ({ ...i }));
+  const remote = REMOTE_ITEMS.map((i) => ({ ...i }));
+  const snapshot = () => {
+    const copy = (l) => l.map((i) => ({ ...i }));
+    if (MODE === 'flat') return copy(items);
+    return [
+      { remote_client_id: '0', item_data: copy(items) },
+      { remote_client_id: '76561190000000001', item_data: copy(remote) },
+    ];
+  };
   const sandbox = {
     setTimeout, console,
     SteamClient: {
       Downloads: {
-        RegisterForDownloadItems(cb) { setTimeout(() => cb(true, ITEMS.map((i) => ({ ...i }))), 10); return { unregister() {} }; },
-        QueueAppUpdate(id) { console.log('QUEUED ' + id); },
+        RegisterForDownloadItems(cb) { setTimeout(() => cb(true, snapshot()), 10); return { unregister() {} }; },
+        ResumeAppUpdate(id, client) {
+          if (MODE === 'stuck') return;
+          if (MODE !== 'flat' && String(client) !== '0') return;   // real Steam refuses a missing/wrong client id
+          const it = items.find((i) => i.appid === id);
+          if (!it || it.completed || it.active) return;
+          it.deferred_time = 0;
+          it.queue_index = 1 + Math.max(0, ...items.map((i) => i.queue_index));
+          console.log('QUEUED ' + id);
+        },
+        // Steam no longer uses this for Scheduled games; calling it moves nothing.
+        QueueAppUpdate() {},
       },
     },
     appStore: { GetAppOverviewByAppID: (id) => ({ display_name: 'Game ' + id }) },

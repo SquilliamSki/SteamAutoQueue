@@ -49,6 +49,8 @@ $okOut = Join-Path $work 'fake-ok.txt'
 $servers = @(
     Start-Process -FilePath 'node' -ArgumentList "`"$server`"", '18080', 'ok' -RedirectStandardOutput $okOut -RedirectStandardError (Join-Path $work 'fake-ok-err.txt') -NoNewWindow -PassThru
     Start-Process -FilePath 'node' -ArgumentList "`"$server`"", '18081', 'notready' -RedirectStandardOutput (Join-Path $work 'fake-nr.txt') -RedirectStandardError (Join-Path $work 'fake-nr-err.txt') -NoNewWindow -PassThru
+    Start-Process -FilePath 'node' -ArgumentList "`"$server`"", '18082', 'flat' -RedirectStandardOutput (Join-Path $work 'fake-flat.txt') -RedirectStandardError (Join-Path $work 'fake-flat-err.txt') -NoNewWindow -PassThru
+    Start-Process -FilePath 'node' -ArgumentList "`"$server`"", '18083', 'stuck' -RedirectStandardOutput (Join-Path $work 'fake-stuck.txt') -RedirectStandardError (Join-Path $work 'fake-stuck-err.txt') -NoNewWindow -PassThru
 )
 $script:SeenQueued = 0
 function Get-NewQueued {
@@ -60,7 +62,7 @@ function Get-NewQueued {
 
 try {
     $deadline = (Get-Date).AddSeconds(15)
-    foreach ($p in 18080, 18081) {
+    foreach ($p in 18080, 18081, 18082, 18083) {
         while ($true) {
             try { Invoke-WebRequest "http://127.0.0.1:$p/json" -UseBasicParsing -TimeoutSec 2 | Out-Null; break }
             catch { if ((Get-Date) -gt $deadline) { throw "Fake Steam on port $p did not start. Is Node.js installed?" }; Start-Sleep -Milliseconds 300 }
@@ -85,7 +87,8 @@ try {
     $S = Get-Settings
     $r = Invoke-QueueUpdates $S
     Check ($r.Ok) 'talks to Steam'
-    Check (((Get-NewQueued) -join ',') -eq '10') 'queues Scheduled, skips excluded/unscheduled/active/done'
+    Check (((Get-NewQueued) -join ',') -eq '10') 'queues Scheduled on this PC only; skips excluded/unscheduled/active/done/other PCs'
+    Check ((@($r.Queued | ForEach-Object { $_.name }) -join ',') -eq 'Game 10') 'reports only what Steam actually moved'
     Check ($r.Scheduled -eq 2 -and $r.Unscheduled -eq 1 -and $r.Excluded -eq 1) 'counts are right'
     Check ((Format-Result $r) -like 'Queued 1 update(s): Game 10*Unscheduled left alone*') 'result text'
 
@@ -96,6 +99,15 @@ try {
     $S.TestMode = $true
     $r = Invoke-QueueUpdates $S
     Check ((Get-NewQueued).Count -eq 0 -and (Format-Result $r) -like 'TEST MODE*3 update(s)*') 'TestMode queues nothing but reports'
+
+    $S.TestMode = $false; $S.QueueUnscheduledToo = $false; $S.ExcludeAppIds = @()
+    $S.DebugPort = 18082
+    $r = Invoke-QueueUpdates $S
+    Check ($r.Ok -and (@($r.Queued | ForEach-Object { $_.appid }) -join ',') -eq '10,20') 'older flat list format still works'
+
+    $S.DebugPort = 18083
+    $r = Invoke-QueueUpdates $S
+    Check ((-not $r.Ok) -and $r.Reason -eq 'Error' -and $r.Detail -like '*did not move*') 'Steam ignoring the request is reported, not claimed as queued'
 
     $S.DebugPort = 18081
     Check ((Invoke-QueueUpdates $S).Reason -eq 'NotReady') 'Steam still loading -> NotReady'

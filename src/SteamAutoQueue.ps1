@@ -26,7 +26,7 @@ $ErrorActionPreference = 'Stop'
 # Bump AppVersion for each release. Put your GitHub "owner/repo" in UpdateRepo
 # and tag releases like v1.2.0; the tray will tell people when a newer version
 # is out. Leave UpdateRepo empty to hide the update check.
-$AppVersion = '1.1.1'
+$AppVersion = '1.1.2'
 $UpdateRepo = 'SquilliamSki/SteamAutoQueue'
 # ---------------------------------------------------------------------------
 
@@ -203,8 +203,12 @@ $QueueJs = @'
 (async () => {
   if (typeof SteamClient === 'undefined' || !SteamClient.Downloads) return { ok: false, error: 'steam-not-ready' };
   const D = SteamClient.Downloads;
-  if (typeof D.RegisterForDownloadItems !== 'function' || typeof D.QueueAppUpdate !== 'function') return { ok: false, error: 'api-missing' };
-  const items = await new Promise((resolve) => {
+  if (typeof D.RegisterForDownloadItems !== 'function' || typeof D.ResumeAppUpdate !== 'function') return { ok: false, error: 'api-missing' };
+  const LOCAL = '0';   // Steam's id for "this PC" (other ids are remote-download PCs)
+
+  // Steam hands the list over either flat (older Steam) or grouped per PC:
+  // [{ remote_client_id: '0', item_data: [ ...games... ] }, ...]
+  const readItems = () => new Promise((resolve) => {
     let done = false, reg = null;
     const finish = (v) => {
       if (done) return;
@@ -212,11 +216,26 @@ $QueueJs = @'
       setTimeout(() => { try { if (reg) reg.unregister(); } catch (e) {} }, 0);
       resolve(v);
     };
-    try { reg = D.RegisterForDownloadItems((busy, list) => finish(Array.isArray(list) ? list : [])); }
-    catch (e) { finish(null); }
+    try {
+      reg = D.RegisterForDownloadItems((busy, list) => {
+        if (!Array.isArray(list)) return finish(null);
+        if (list.length && list[0] && Array.isArray(list[0].item_data)) {
+          const mine = list.find((g) => String(g.remote_client_id) === LOCAL);
+          return finish(mine ? mine.item_data : []);
+        }
+        if (list.length && list[0] && typeof list[0].appid !== 'number') return finish(null);
+        finish(list);
+      });
+    } catch (e) { finish(null); }
     setTimeout(() => finish(null), 8000);
   });
-  if (items === null) return { ok: false, error: 'no-download-list' };
+
+  // Same tests Steam's Downloads page uses for its sections.
+  const isScheduled = (i) => i.queue_index === -1 && !!i.deferred_time && !i.completed;
+  const isUnscheduled = (i) => !i.active && !i.completed && i.queue_index === -1 && !i.deferred_time;
+
+  const items = await readItems();
+  if (items === null) return { ok: false, error: 'unknown-list-format' };
 
   const exclude = new Set(__EXCLUDE__);
   const includeUnscheduled = __UNSCHEDULED__;
@@ -229,26 +248,33 @@ $QueueJs = @'
     return 'App ' + id;
   };
 
-  const waiting = items.filter((i) => !i.completed && !i.active && i.queue_index < 0);
-  const scheduled = waiting.filter((i) => i.deferred_time > 0);
-  const picked = waiting.filter((i) => !exclude.has(i.appid) && (includeUnscheduled || i.deferred_time > 0));
+  const scheduled = items.filter(isScheduled);
+  const unscheduled = items.filter(isUnscheduled);
+  const picked = items.filter((i) => !exclude.has(i.appid) && (isScheduled(i) || (includeUnscheduled && isUnscheduled(i))));
+  const base = { ok: true, scheduled: scheduled.length, unscheduled: unscheduled.length,
+                 excluded: scheduled.concat(unscheduled).filter((i) => exclude.has(i.appid)).length };
 
-  const queued = [];
-  for (const i of picked) {
-    if (!testMode) {
-      try { D.QueueAppUpdate(i.appid); } catch (e) { continue; }
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    queued.push({ appid: i.appid, name: nameOf(i.appid) });
+  if (testMode || picked.length === 0) {
+    return Object.assign(base, { queued: picked.map((i) => ({ appid: i.appid, name: nameOf(i.appid) })), failed: [] });
   }
-  return {
-    ok: true,
-    total: items.length,
-    scheduled: scheduled.length,
-    unscheduled: waiting.length - scheduled.length,
-    excluded: waiting.filter((i) => exclude.has(i.appid)).length,
-    queued: queued
-  };
+
+  // What Steam's own "move to top" button on a Scheduled game does.
+  for (const i of picked) {
+    try { D.ResumeAppUpdate(i.appid, LOCAL); } catch (e) {}
+    await new Promise((r) => setTimeout(r, 250));
+  }
+
+  // Check Steam actually moved them, instead of trusting the call.
+  await new Promise((r) => setTimeout(r, 1500));
+  const after = await readItems();
+  const stillWaiting = new Set((after || []).filter((i) => isScheduled(i) || isUnscheduled(i)).map((i) => i.appid));
+  const queued = [], failed = [];
+  for (const i of picked) {
+    const entry = { appid: i.appid, name: nameOf(i.appid) };
+    if (after === null || stillWaiting.has(i.appid)) failed.push(entry); else queued.push(entry);
+  }
+  if (queued.length === 0) return { ok: false, error: 'not-accepted', failed: failed.length };
+  return Object.assign(base, { queued: queued, failed: failed });
 })()
 '@
 
@@ -270,6 +296,8 @@ function Invoke-QueueUpdates($S) {
     catch { return [pscustomobject]@{ Ok = $false; Reason = 'Error'; Detail = $_.Exception.Message } }
 
     if ($v -and $v.error -eq 'api-missing') { return [pscustomobject]@{ Ok = $false; Reason = 'Error'; Detail = 'Steam no longer has the download functions this tool uses.' } }
+    if ($v -and $v.error -eq 'unknown-list-format') { return [pscustomobject]@{ Ok = $false; Reason = 'Error'; Detail = 'Steam changed the format of its download list.' } }
+    if ($v -and $v.error -eq 'not-accepted') { return [pscustomobject]@{ Ok = $false; Reason = 'Error'; Detail = "Steam did not move any of the $($v.failed) scheduled update(s) when asked." } }
     if (-not $v -or -not $v.ok) {
         $detail = ''
         if ($v) { $detail = $v.error }
@@ -278,7 +306,8 @@ function Invoke-QueueUpdates($S) {
 
     return [pscustomobject]@{
         Ok          = $true
-        Queued      = @($v.queued)
+        Queued      = @($v.queued | Where-Object { $_ -and $_.appid })
+        Failed      = @($v.failed | Where-Object { $_ -and $_.appid })
         Scheduled   = [int]$v.scheduled
         Unscheduled = [int]$v.unscheduled
         Excluded    = [int]$v.excluded
@@ -293,6 +322,9 @@ function Format-Result($r) {
     if ($r.TestMode) { $verb = 'TEST MODE - would have queued' }
     if ($names.Count -eq 0) { $text = 'Nothing waiting in Scheduled.' }
     else { $text = '{0} {1} update(s): {2}' -f $verb, $names.Count, ($names -join ', ') }
+    if ($r.Failed.Count -gt 0) {
+        $text += " Steam didn't move: " + ((@($r.Failed | ForEach-Object { $_.name })) -join ', ') + '.'
+    }
     if ($r.Unscheduled -gt 0 -and -not $r.Unsched) {
         $text += " ($($r.Unscheduled) in Unscheduled left alone.)"
     }

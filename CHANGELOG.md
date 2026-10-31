@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.2
+- Fix: updates in Scheduled were not being moved. Steam now sends its download list grouped per PC and moves Scheduled games with `ResumeAppUpdate(appid, clientId)`; the tool now does the same as Steam's own "move to top" button.
+- After asking Steam to move updates, the tool checks they actually moved. It only reports what really moved, and the icon turns orange if Steam ignores the request.
+- Fix: a run that queued nothing could be reported as "Queued 1 update(s)".
+
 ## 1.1.1
 - First public release.
 - The log no longer records Steam's command line when restarting Steam (it can contain login details).
