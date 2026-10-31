@@ -1,0 +1,30 @@
+# Push a tag like v1.2.0 and this tests, builds the zip, and publishes a
+# GitHub Release with it attached. The tray app's update check reads that
+# release. The tag must match $AppVersion in src/SteamAutoQueue.ps1.
+#
+# Uses only the automatic GITHUB_TOKEN - no secrets to set up.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1
+      - name: Build zip
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\Build-Release.ps1 -Tag "${{ github.ref_name }}"
+      - name: Publish release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" (Get-ChildItem dist\SteamAutoQueue-*.zip).FullName --title "Steam Auto Queue ${{ github.ref_name }}" --generate-notes

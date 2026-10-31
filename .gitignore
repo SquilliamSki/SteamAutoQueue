@@ -1,0 +1,29 @@
+# Files the tool writes while running - may contain game names, paths
+# or other details about someone's PC. Never commit these.
+log.txt
+log.old.txt
+state.json
+*.ico
+
+# Release builds (made by tools/Build-Release.ps1, uploaded to GitHub Releases)
+dist/
+
+# Secrets - nothing in this project needs any, so keep it that way
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+*.token
+secrets*
+
+# Editor / OS clutter
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
+node_modules/

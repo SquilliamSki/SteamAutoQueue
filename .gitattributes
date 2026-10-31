@@ -1,0 +1,16 @@
+# Normalize line endings in the repo; Windows files always check out as CRLF,
+# which cmd.exe needs for .cmd files to run correctly.
+* text=auto
+
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+*.ini  text eol=crlf
+*.txt  text eol=crlf
+
+*.md   text eol=lf
+*.yml  text eol=lf
+*.js   text eol=lf
+
+*.png  binary
+*.ico  binary
+*.zip  binary
